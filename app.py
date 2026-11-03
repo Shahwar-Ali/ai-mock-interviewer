@@ -49,7 +49,7 @@ Instructions:
 3. Keep it conversational, focused, and realistic. Do not ask multiple questions at once.
 """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash-lite",
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.7)
     )
@@ -77,7 +77,7 @@ Instructions:
 Keep the response concise and natural.
 """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash-lite",
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.6)
     )
@@ -124,7 +124,7 @@ Generate an evaluation report strictly in valid JSON format matching this schema
 Output ONLY the JSON object. Do not wrap in markdown tags or backticks.
 """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash-lite",
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
