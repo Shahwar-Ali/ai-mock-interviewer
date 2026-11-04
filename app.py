@@ -2,17 +2,16 @@ import streamlit as st
 import json
 import time
 from pypdf import PdfReader
-from google import genai
-from google.genai import types
-from google.genai.errors import ServerError, APIError
+from groq import Groq
 
 st.set_page_config(
-    page_title="Pak Exam Prep - Matric & Inter",
+    page_title="Pak Exam Prep - Matric & Inter (Groq)",
     page_icon="📖",
     layout="wide"
 )
 
-MODEL_NAME = "gemini-3.5-flash-lite"
+# High-performing model available on Groq
+MODEL_NAME = "llama-3.3-70b-versatile"
 
 def clean_json_string(raw_text: str) -> str:
     text = raw_text.strip()
@@ -24,18 +23,17 @@ def clean_json_string(raw_text: str) -> str:
         text = text[:-3]
     return text.strip()
 
-def safe_generate_content(client, model, contents, config, retries=3):
-    for attempt in range(retries):
-        try:
-            return client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=config
-            )
-        except (ServerError, APIError) as e:
-            if attempt == retries - 1:
-                raise e
-            time.sleep(3)
+def safe_groq_generate(client, prompt: str, system_message: str = "You are an examiner. Always return valid JSON."):
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt}
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.2
+    )
+    return response.choices[0].message.content
 
 def extract_text_from_pdf(uploaded_file):
     reader = PdfReader(uploaded_file)
@@ -46,21 +44,17 @@ def extract_text_from_pdf(uploaded_file):
             extracted.append(f"--- Page {page_idx + 1} ---\n{text}")
     return "\n".join(extracted)
 
-# --- Safe API Key Resolution ---
-raw_key = st.secrets.get("GEMINI_API_KEY", "").strip()
+# --- Retrieve Groq Key from Secrets or Sidebar ---
+saved_key = st.secrets.get("GROQ_API_KEY", "").strip()
 
 with st.sidebar:
-    st.title("🇵🇰 Exam Preferences")
+    st.title("⚡ Groq Exam Prep Settings")
     
-    # Check if existing key is invalid OAuth token
-    if raw_key.startswith("AQ."):
-        st.error("⚠️ The key in Streamlit Secrets starts with 'AQ.' which is a temporary login token, not an API key.")
-        api_key = st.text_input("Enter valid Gemini API Key (starts with AIzaSy):", type="password")
-    elif raw_key.startswith("AIzaSy"):
-        api_key = raw_key
-        st.success("✅ Valid API Key loaded from Secrets")
+    if saved_key.startswith("gsk_"):
+        api_key = saved_key
+        st.success("✅ Groq API Key loaded")
     else:
-        api_key = st.text_input("Enter Gemini API Key (starts with AIzaSy):", value=raw_key, type="password")
+        api_key = st.text_input("Enter Groq API Key (starts with gsk_):", value=saved_key, type="password")
 
     academic_level = st.selectbox(
         "Academic Level:",
@@ -94,43 +88,33 @@ if "evaluation_result" not in st.session_state:
     st.session_state.evaluation_result = None
 
 st.title("📚 Matric & Inter Textbook Exam Prep Coach")
-st.caption("Upload a chapter PDF or paste notes to generate board-pattern questions and receive automated grading.")
+st.caption("Powered by Groq Llama-3.3 — Fast textbook question generation and board grading.")
 
-# Check for valid API key before proceeding
-is_valid_key = api_key and api_key.startswith("AIzaSy")
+is_valid_key = api_key and api_key.startswith("gsk_")
 
 if not is_valid_key:
-    st.warning("⚠️ **Valid API Key Required to Generate Questions**")
-    st.info(
-        """
-        Your API key must start with **`AIzaSy`**.
-        
-        If you see **`AQ.`**, you copied the web login code instead of the key.
-        1. Open [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials)
-        2. Click **+ CREATE CREDENTIALS** ➔ **API key**
-        3. Copy the string starting with `AIzaSy` and paste it into the sidebar.
-        """
-    )
+    st.warning("⚠️ **Valid Groq API Key Required**")
+    st.info("Enter your Groq key starting with `gsk_` in the sidebar or save it under `GROQ_API_KEY` in Streamlit Secrets.")
 
 # --- 1. Chapter Input ---
 if not st.session_state.chapter_text:
     st.subheader("1️⃣ Provide Your Textbook Chapter")
-    upload_tab, paste_tab = st.tabs(["📄 Upload Textbook Chapter (PDF)", "📝 Paste Text / Notes"])
+    upload_tab, paste_tab = st.tabs(["📄 Upload Chapter (PDF)", "📝 Paste Notes"])
     
     with upload_tab:
         uploaded_pdf = st.file_uploader("Upload Chapter PDF", type=["pdf"])
         if uploaded_pdf and st.button("Process PDF Chapter", type="primary"):
-            with st.spinner("Extracting text from textbook pages..."):
+            with st.spinner("Reading textbook pages..."):
                 extracted = extract_text_from_pdf(uploaded_pdf)
                 if not extracted.strip():
-                    st.error("No readable text found. Ensure the PDF is not an image scan.")
+                    st.error("No readable text found in PDF.")
                 else:
-                    st.session_state.chapter_text = extracted[:20000]
-                    st.success("Chapter text extracted successfully!")
+                    st.session_state.chapter_text = extracted[:15000]
+                    st.success("Text extracted successfully!")
                     st.rerun()
                     
     with paste_tab:
-        pasted_text = st.text_area("Paste chapter text or topic notes directly:", height=250)
+        pasted_text = st.text_area("Paste chapter text or topic notes:", height=250)
         if pasted_text and st.button("Use Pasted Text", type="primary"):
             st.session_state.chapter_text = pasted_text.strip()
             st.rerun()
@@ -147,8 +131,8 @@ if st.session_state.chapter_text and st.session_state.quiz_data is None:
         num_long = st.slider("Long Questions", 0, 2, 1)
 
     if st.button("🎯 Generate Practice Exam", type="primary", disabled=not is_valid_key):
-        client = genai.Client(api_key=api_key)
-        with st.spinner("Drafting questions according to board pattern..."):
+        client = Groq(api_key=api_key)
+        with st.spinner("Generating exam with Groq... (~2-4 seconds)"):
             prompt = f"""
 You are a board examiner for Pakistani {board_system} for {academic_level}.
 Generate practice questions derived STRICTLY from this textbook excerpt:
@@ -156,18 +140,18 @@ Generate practice questions derived STRICTLY from this textbook excerpt:
 {st.session_state.chapter_text}
 \"\"\"
 
-Produce:
+Requirements:
 - Exactly {num_mcqs} MCQs (4 options: A, B, C, D)
 - Exactly {num_short} Short Answer Questions
 - Exactly {num_long} Long / Essay Questions
 
-Return strictly valid JSON:
+Respond ONLY with valid JSON using this exact schema:
 {{
   "mcqs": [
     {{
       "id": 1,
       "question": "string",
-      "options": ["A) string", "B) string", "C) string", "D) string"],
+      "options": ["A) option 1", "B) option 2", "C) option 3", "D) option 4"],
       "correct_option": "A",
       "textbook_ref": "string"
     }}
@@ -176,7 +160,7 @@ Return strictly valid JSON:
     {{
       "id": 1,
       "question": "string",
-      "ideal_key_points": ["string"]
+      "ideal_key_points": ["point 1", "point 2"]
     }}
   ],
   "long_questions": [
@@ -189,16 +173,8 @@ Return strictly valid JSON:
 }}
 """
             try:
-                response = safe_generate_content(
-                    client=client,
-                    model=MODEL_NAME,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.3,
-                        response_mime_type="application/json"
-                    )
-                )
-                clean_res = clean_json_string(response.text)
+                raw_json = safe_groq_generate(client, prompt)
+                clean_res = clean_json_string(raw_json)
                 st.session_state.quiz_data = json.loads(clean_res)
                 st.rerun()
             except Exception as e:
@@ -240,23 +216,23 @@ if st.session_state.quiz_data and st.session_state.evaluation_result is None:
             )
 
     if st.button("📤 Submit for Grading", type="primary", disabled=not is_valid_key):
-        client = genai.Client(api_key=api_key)
+        client = Groq(api_key=api_key)
         with st.spinner("Grading answers against textbook content..."):
             eval_prompt = f"""
 You are an examiner for Pakistani {board_system} for {academic_level}.
-Grade these answers STRICTLY against the textbook text below.
+Grade these student answers STRICTLY against the textbook text below.
 
 TEXTBOOK CONTENT:
 {st.session_state.chapter_text}
 
-EXAM PAPER:
+EXAM QUESTIONS:
 {json.dumps(quiz)}
 
-STUDENT ANSWERS:
+STUDENT SUBMITTED ANSWERS:
 {json.dumps(user_answers)}
 
 Language for explanations: {explanation_lang}
-(If "Urdu (اردو)", use proper Urdu script. If "Roman Urdu", write in conversational Roman Urdu. If "English", use clear academic English.)
+(If "Urdu (اردو)", provide explanations in Urdu script. If "Roman Urdu", use Roman Urdu. If "English", use formal English.)
 
 Return strictly valid JSON:
 {{
@@ -286,16 +262,8 @@ Return strictly valid JSON:
 }}
 """
             try:
-                eval_res = safe_generate_content(
-                    client=client,
-                    model=MODEL_NAME,
-                    contents=eval_prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.2,
-                        response_mime_type="application/json"
-                    )
-                )
-                clean_eval = clean_json_string(eval_res.text)
+                eval_json = safe_groq_generate(client, eval_prompt)
+                clean_eval = clean_json_string(eval_json)
                 st.session_state.evaluation_result = json.loads(clean_eval)
                 st.rerun()
             except Exception as e:
