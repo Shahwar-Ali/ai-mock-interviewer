@@ -1,300 +1,258 @@
 import streamlit as st
 import json
+import time
 from google import genai
 from google.genai import types
+from google.genai.errors import ServerError, APIError
 
-st.set_page_config(
-    page_title="AI Mock Interview Coach",
-    page_icon="🎙️",
-    layout="wide"
-)
+# --- Page Setup ---
+st.set_page_config(page_title="AI Mock Interviewer", page_icon="🎯", layout="wide")
+st.title("🎯 AI Mock Interview Coach")
 
-# Session State Initialization
+# --- Model & Robust API Call Function ---
+MODEL_NAME = "gemini-3.5-flash-lite"
+
+def safe_generate_content(client, model, contents, config, retries=3):
+    """Wrapper that retries on transient Google ServerError/APIError."""
+    for attempt in range(retries):
+        try:
+            return client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config
+            )
+        except (ServerError, APIError) as e:
+            if attempt == retries - 1:
+                raise e
+            time.sleep(3)  # Wait 3 seconds before retrying
+
+# --- API Key Detection ---
+api_key = None
+if "GEMINI_API_KEY" in st.secrets:
+    api_key = st.secrets["GEMINI_API_KEY"]
+
+# --- Sidebar Configuration ---
+with st.sidebar:
+    st.header("⚙️ Interview Settings")
+    if not api_key:
+        api_key = st.text_input("Enter Gemini API Key:", type="password")
+        if api_key:
+            st.success("API Key provided!")
+        else:
+            st.warning("Please provide an API Key to continue.")
+    else:
+        st.success("API Key loaded from Secrets!")
+
+    persona = st.selectbox(
+        "Interviewer Persona",
+        ["Tough Technical Lead", "Supportive Mentor", "Strict HR / Behavioral Recruiter"]
+    )
+    total_questions = st.slider("Total Questions", min_value=1, max_value=6, value=3)
+
+    if st.button("🔄 Reset Interview", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
+
+# --- Initialize Session State ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "interview_active" not in st.session_state:
-    st.session_state.interview_active = False
-if "current_question_count" not in st.session_state:
-    st.session_state.current_question_count = 0
-if "scorecard_data" not in st.session_state:
-    st.session_state.scorecard_data = None
-if "job_description" not in st.session_state:
-    st.session_state.job_description = ""
-if "persona" not in st.session_state:
-    st.session_state.persona = ""
-if "max_questions" not in st.session_state:
-    st.session_state.max_questions = 4
+if "question_count" not in st.session_state:
+    st.session_state.question_count = 0
+if "interview_started" not in st.session_state:
+    st.session_state.interview_started = False
+if "interview_completed" not in st.session_state:
+    st.session_state.interview_completed = False
+if "evaluation" not in st.session_state:
+    st.session_state.evaluation = None
 
-api_key = st.secrets.get("GEMINI_API_KEY", "")
-
-def get_gemini_client(key):
-    return genai.Client(api_key=key)
-
-def generate_first_question(client, jd, candidate_bg, persona):
+# --- Interview Flow Functions ---
+def start_interview(client, job_desc, background):
     prompt = f"""
-You are an expert interviewer adopting the following persona: {persona}.
-Target Job Description:
-\"\"\"
-{jd}
-\"\"\"
-
-Candidate Background / Resume Summary (optional):
-\"\"\"
-{candidate_bg}
-\"\"\"
+You are conducting a professional mock interview.
+Persona: {persona}
+Target Role / Job Description: {job_desc}
+Candidate Background: {background}
 
 Instructions:
-1. Greet the candidate briefly in character (1-2 sentences).
-2. Ask your FIRST interview question based on the role requirements or their background.
-3. Keep it conversational, focused, and realistic. Do not ask multiple questions at once.
+1. Greet the candidate in character briefly.
+2. Ask ONLY Question 1. Do not ask multiple questions at once.
+3. Stay strictly in character.
 """
-    response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
+    response = safe_generate_content(
+        client=client,
+        model=MODEL_NAME,
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.7)
     )
-    return response.text.strip()
+    return response.text
 
-def generate_next_turn(client, conversation_history, jd, persona, current_count, max_count):
-    dialogue = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in conversation_history])
-    
+def get_next_question(client, job_desc, transcript, current_q, total_q):
     prompt = f"""
-You are conducting an interview as a {persona}.
-Target Job Description:
-\"\"\"
-{jd}
-\"\"\"
+You are conducting a mock interview.
+Persona: {persona}
+Job Description: {job_desc}
+Current Question Count: {current_q} of {total_q}
 
-Conversation So Far:
-{dialogue}
-
-Current Question Number: {current_count} of {max_count}.
+Transcript so far:
+{transcript}
 
 Instructions:
-1. Provide a brief, natural reaction to the candidate's last answer (1 sentence).
-2. If this was NOT the final question (current < {max_count}), ask your next targeted question (technical, behavioral, or situational).
-3. If this WAS the final question (current >= {max_count}), thank the candidate warmly, close the interview, and state that feedback is being compiled.
-Keep the response concise and natural.
+1. Briefly evaluate the candidate's last answer in character (1-2 sentences acknowledging strengths or probing gaps).
+2. Ask Question {current_q + 1}. Focus on a different critical requirement from the job description.
+3. Ask ONLY ONE question. Do not conclude the interview yet.
 """
-    response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
+    response = safe_generate_content(
+        client=client,
+        model=MODEL_NAME,
         contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.6)
+        config=types.GenerateContentConfig(temperature=0.7)
     )
-    return response.text.strip()
+    return response.text
 
-def evaluate_interview(client, conversation_history, jd):
-    dialogue = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in conversation_history])
-    
+def run_evaluation(client, job_desc, transcript):
     prompt = f"""
-You are a senior hiring manager and executive talent evaluator.
-Review this full mock interview transcript for the target role:
+You are an expert technical hiring manager evaluating a completed candidate interview transcript.
+Job Description: {job_desc}
 
-TARGET JOB DESCRIPTION:
-\"\"\"
-{jd}
-\"\"\"
+Transcript:
+{transcript}
 
-TRANSCRIPT:
-\"\"\"
-{dialogue}
-\"\"\"
-
-Generate an evaluation report strictly in valid JSON format matching this schema:
+Analyze the candidate's performance across all turns and return your analysis strictly as a valid JSON object matching this schema:
 {{
-  "overall_score": <int 0-100>,
-  "verdict": "<Strong Hire | Lean Hire | Re-interview | Pass>",
-  "summary": "<1-2 sentence overview of candidate performance>",
-  "category_scores": {{
-    "technical_accuracy": <int 0-100>,
-    "communication_clarity": <int 0-100>,
-    "star_method_depth": <int 0-100>
-  }},
-  "strengths": [
-    "<Highlight 1>",
-    "<Highlight 2>"
-  ],
-  "areas_for_improvement": [
-    "<Critique 1 with actionable fix>",
-    "<Critique 2 with actionable fix>"
-  ],
-  "model_answer_coaching": "<Pick one question where candidate gave a mediocre or brief answer, and show an ideal sample response using STAR framework>"
+  "overall_score": 85,
+  "verdict": "Strong Hire",
+  "technical_depth_score": 85,
+  "communication_score": 80,
+  "strengths": ["string", "string"],
+  "improvements": ["string", "string"],
+  "model_answers": [
+    {{
+      "question": "string",
+      "critique": "string",
+      "suggested_response": "string"
+    }}
+  ]
 }}
 
-Output ONLY the JSON object. Do not wrap in markdown tags or backticks.
+Do NOT wrap the JSON in Markdown code fences. Output valid raw JSON only.
 """
-    response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
+    response = safe_generate_content(
+        client=client,
+        model=MODEL_NAME,
         contents=prompt,
         config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.2
+            temperature=0.2,
+            response_mime_type="application/json"
         )
     )
-    return json.loads(response.text)
+    try:
+        clean_text = response.text.strip()
+        if clean_text.startswith("```json"):
+            clean_text = clean_text[7:]
+        if clean_text.startswith("```"):
+            clean_text = clean_text[3:]
+        if clean_text.endswith("```"):
+            clean_text = clean_text[:-3]
+        return json.loads(clean_text.strip())
+    except Exception:
+        return {"raw_evaluation": response.text}
 
-# Sidebar UI
-with st.sidebar:
-    st.title("⚙️ Interview Setup")
-    
-    if not api_key:
-        api_key = st.text_input("Gemini API Key", type="password", help="Enter your Google AI Studio API key")
-    
-    st.markdown("---")
-    persona_choice = st.selectbox(
-        "Interviewer Persona",
-        [
-            "Tough Technical Lead (Drills into system architecture, trade-offs & edge cases)",
-            "Friendly HR Talent Partner (Focuses on behavioral, team fit, and STAR stories)",
-            "Executive Director (High-level business impact, prioritization, and leadership)"
-        ]
-    )
-    
-    num_questions = st.slider("Total Interview Questions", min_value=3, max_value=6, value=4)
-    
-    if st.button("🔄 Reset Interview", use_container_width=True):
-        st.session_state.messages = []
-        st.session_state.interview_active = False
-        st.session_state.current_question_count = 0
-        st.session_state.scorecard_data = None
-        st.rerun()
-
-st.title("🎙️ AI Mock Interview Coach")
-st.write("Practice real-time technical and behavioral interviews with tailored feedback and scoring.")
-
-# Setup Screen
-if not st.session_state.interview_active and st.session_state.scorecard_data is None:
+# --- Main App Interface ---
+if not st.session_state.interview_started:
+    st.subheader("📋 Interview Setup")
     col1, col2 = st.columns(2)
     with col1:
-        jd_input = st.text_area(
-            "Target Job Description *",
-            height=200,
-            placeholder="Paste the job description or role requirements here..."
+        job_desc = st.text_area(
+            "Target Job Description:",
+            placeholder="Paste the job description or role requirements here...",
+            height=180
         )
     with col2:
-        resume_input = st.text_area(
-            "Your Background / Key Experience (Optional)",
-            height=200,
-            placeholder="Paste your resume summary or technical highlights..."
+        candidate_bg = st.text_area(
+            "Your Experience / Background (Optional):",
+            placeholder="Highlight your current skills, projects, or areas of focus...",
+            height=180
         )
-    
+
     if st.button("🚀 Start Interview", type="primary", use_container_width=True):
         if not api_key:
-            st.error("Please provide a Gemini API Key in the sidebar or in secrets.toml.")
-        elif not jd_input.strip():
-            st.error("Please enter a Target Job Description to begin.")
+            st.error("Please provide a Gemini API Key in the sidebar or via Secrets.")
+        elif not job_desc.strip():
+            st.error("Please enter a Target Job Description.")
         else:
-            client = get_gemini_client(api_key)
-            with st.spinner("Preparing interview session..."):
-                st.session_state.job_description = jd_input
-                st.session_state.persona = persona_choice
-                st.session_state.max_questions = num_questions
-                st.session_state.current_question_count = 1
-                
-                first_q = generate_first_question(client, jd_input, resume_input, persona_choice)
+            with st.spinner("Preparing your interview session..."):
+                client = genai.Client(api_key=api_key)
+                st.session_state.job_desc = job_desc
+                st.session_state.candidate_bg = candidate_bg
+                first_q = start_interview(client, job_desc, candidate_bg)
                 st.session_state.messages.append({"role": "assistant", "content": first_q})
-                st.session_state.interview_active = True
+                st.session_state.question_count = 1
+                st.session_state.interview_started = True
                 st.rerun()
 
-# Active Chat Screen
-if st.session_state.interview_active:
-    st.progress(
-        st.session_state.current_question_count / st.session_state.max_questions,
-        text=f"Question {st.session_state.current_question_count} of {st.session_state.max_questions}"
-    )
-    
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
-            
-    user_input = st.chat_input("Type your answer here...")
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        
-        client = get_gemini_client(api_key)
-        with st.spinner("Analyzing answer and preparing next question..."):
-            if st.session_state.current_question_count < st.session_state.max_questions:
-                st.session_state.current_question_count += 1
-                next_msg = generate_next_turn(
-                    client,
-                    st.session_state.messages,
-                    st.session_state.job_description,
-                    st.session_state.persona,
-                    st.session_state.current_question_count,
-                    st.session_state.max_questions
-                )
-                st.session_state.messages.append({"role": "assistant", "content": next_msg})
-                st.rerun()
+else:
+    # Display Chat History
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Completed Evaluation View
+    if st.session_state.interview_completed:
+        st.divider()
+        st.success("🎉 Interview Completed! Review your evaluation scorecard below:")
+        eval_data = st.session_state.evaluation
+
+        if eval_data and "overall_score" in eval_data:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Overall Score", f"{eval_data.get('overall_score', 'N/A')}/100")
+            m2.metric("Verdict", eval_data.get('verdict', 'N/A'))
+            m3.metric("Technical Depth", f"{eval_data.get('technical_depth_score', 'N/A')}/100")
+            m4.metric("Communication", f"{eval_data.get('communication_score', 'N/A')}/100")
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.subheader("✅ Key Strengths")
+                for s in eval_data.get("strengths", []):
+                    st.write(f"• {s}")
+            with col_b:
+                st.subheader("⚠️ Areas for Improvement")
+                for imp in eval_data.get("improvements", []):
+                    st.write(f"• {imp}")
+
+            st.subheader("💡 Model Answer Coaching")
+            for item in eval_data.get("model_answers", []):
+                with st.expander(f"Question: {item.get('question', 'Review')}"):
+                    st.markdown(f"**Critique:** {item.get('critique', '')}")
+                    st.markdown(f"**Suggested Response:**\n{item.get('suggested_response', '')}")
+        elif eval_data and "raw_evaluation" in eval_data:
+            st.markdown(eval_data["raw_evaluation"])
+
+    # Active Turn Input
+    elif not st.session_state.interview_completed:
+        user_input = st.chat_input("Type your response to the interviewer...")
+        if user_input:
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+            client = genai.Client(api_key=api_key)
+            transcript = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in st.session_state.messages])
+
+            if st.session_state.question_count < total_questions:
+                with st.spinner("Interviewer is evaluating and formulating the next question..."):
+                    next_q = get_next_question(
+                        client,
+                        st.session_state.job_desc,
+                        transcript,
+                        st.session_state.question_count,
+                        total_questions
+                    )
+                    st.session_state.messages.append({"role": "assistant", "content": next_q})
+                    st.session_state.question_count += 1
+                    st.rerun()
             else:
-                st.session_state.interview_active = False
-                scorecard = evaluate_interview(
-                    client,
-                    st.session_state.messages,
-                    st.session_state.job_description
-                )
-                st.session_state.scorecard_data = scorecard
-                st.rerun()
-
-# Feedback Scorecard Screen
-if st.session_state.scorecard_data is not None:
-    st.success("🎉 Interview Complete! Here is your performance evaluation.")
-    card = st.session_state.scorecard_data
-    
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.metric("Overall Score", f"{card.get('overall_score', 0)} / 100")
-        st.subheader(f"Verdict: {card.get('verdict', 'N/A')}")
-    with col2:
-        st.write("**Executive Summary:**")
-        st.info(card.get("summary", "No summary generated."))
-        
-    st.markdown("### 📊 Category Scores")
-    cat_scores = card.get("category_scores", {})
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Technical Depth", f"{cat_scores.get('technical_accuracy', 0)}%")
-    c2.metric("Communication Clarity", f"{cat_scores.get('communication_clarity', 0)}%")
-    c3.metric("STAR Method Structure", f"{cat_scores.get('star_method_depth', 0)}%")
-    
-    st.markdown("---")
-    col_str, col_imp = st.columns(2)
-    with col_str:
-        st.markdown("### ✅ Strengths")
-        for s in card.get("strengths", []):
-            st.markdown(f"- {s}")
-            
-    with col_imp:
-        st.markdown("### 🎯 Areas for Improvement")
-        for a in card.get("areas_for_improvement", []):
-            st.markdown(f"- {a}")
-            
-    st.markdown("### 💡 Recommended STAR Response")
-    st.write(card.get("model_answer_coaching", "No coaching breakdown provided."))
-    
-    report_text = f"""# Mock Interview Evaluation Report
-Overall Score: {card.get('overall_score')}/100
-Verdict: {card.get('verdict')}
-
-Summary:
-{card.get('summary')}
-
-Category Breakdown:
-- Technical Accuracy: {cat_scores.get('technical_accuracy')}%
-- Communication Clarity: {cat_scores.get('communication_clarity')}%
-- STAR Method Depth: {cat_scores.get('star_method_depth')}%
-
-Strengths:
-{chr(10).join(['- ' + s for s in card.get('strengths', [])])}
-
-Areas for Improvement:
-{chr(10).join(['- ' + a for a in card.get('areas_for_improvement', [])])}
-
-Model Answer Coaching:
-{card.get('model_answer_coaching')}
-"""
-    st.download_button(
-        label="📥 Download Full Scorecard (.md)",
-        data=report_text,
-        file_name="interview_scorecard.md",
-        mime="text/markdown",
-        use_container_width=True
-    )
+                with st.spinner("Final question answered! Generating your evaluation scorecard..."):
+                    eval_result = run_evaluation(client, st.session_state.job_desc, transcript)
+                    st.session_state.evaluation = eval_result
+                    st.session_state.interview_completed = True
+                    st.rerun()
