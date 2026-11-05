@@ -1,16 +1,14 @@
 import streamlit as st
 import json
 import time
-from pypdf import PdfReader
 from groq import Groq
 
 st.set_page_config(
-    page_title="Pak Exam Prep - Matric & Inter (Groq)",
-    page_icon="📖",
+    page_title="AI Mock Interview Coach",
+    page_icon="💼",
     layout="wide"
 )
 
-# High-performing model available on Groq
 MODEL_NAME = "llama-3.3-70b-versatile"
 
 def clean_json_string(raw_text: str) -> str:
@@ -23,32 +21,11 @@ def clean_json_string(raw_text: str) -> str:
         text = text[:-3]
     return text.strip()
 
-def safe_groq_generate(client, prompt: str, system_message: str = "You are an examiner. Always return valid JSON."):
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": prompt}
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.2
-    )
-    return response.choices[0].message.content
-
-def extract_text_from_pdf(uploaded_file):
-    reader = PdfReader(uploaded_file)
-    extracted = []
-    for page_idx, page in enumerate(reader.pages):
-        text = page.extract_text()
-        if text:
-            extracted.append(f"--- Page {page_idx + 1} ---\n{text}")
-    return "\n".join(extracted)
-
-# --- Retrieve Groq Key from Secrets or Sidebar ---
+# --- Key Resolution ---
 saved_key = st.secrets.get("GROQ_API_KEY", "").strip()
 
 with st.sidebar:
-    st.title("⚡ Groq Exam Prep Settings")
+    st.title("⚙️ Interview Configuration")
     
     if saved_key.startswith("gsk_"):
         api_key = saved_key
@@ -56,248 +33,228 @@ with st.sidebar:
     else:
         api_key = st.text_input("Enter Groq API Key (starts with gsk_):", value=saved_key, type="password")
 
-    academic_level = st.selectbox(
-        "Academic Level:",
-        ["Matric (9th & 10th Class)", "Intermediate (11th & 12th / FSc / ICS / ICom)"]
+    job_role = st.selectbox(
+        "Target Role:",
+        [
+            "Cybersecurity Analyst / SOC Analyst",
+            "Junior Software Engineer (Python/Full-Stack)",
+            "Data Analyst / BI Specialist",
+            "Network & Systems Administrator",
+            "DevOps / Cloud Engineer"
+        ]
     )
-    
-    board_system = st.selectbox(
-        "Board Pattern:",
-        ["Punjab Boards (BISE Lahore, Gujranwala, Rawalpindi, etc.)", 
-         "Federal Board (FBISE - SLO / Conceptual)", 
-         "Sindh Boards (BIEK, BSEK)", 
-         "KPK / Balochistan Boards"]
+
+    experience_level = st.selectbox(
+        "Experience Level:",
+        ["Entry Level / Fresh Graduate", "Associate / Junior (1-2 yrs)", "Mid-Level (3-5 yrs)"]
     )
-    
-    explanation_lang = st.radio(
-        "Explanation Language:",
-        ["English", "Urdu (اردو)", "Roman Urdu (Hamaray alfaaz)"]
+
+    interview_style = st.selectbox(
+        "Interview Style:",
+        ["Balanced (Technical + Behavioral)", "Deep Technical & Scenario-Based", "HR & Culture Fit"]
     )
-    
+
+    total_questions = st.slider("Total Number of Questions:", min_value=3, max_value=8, value=5)
+
     st.markdown("---")
-    if st.button("🔄 Reset / Clear Session", use_container_width=True):
+    if st.button("🔄 Reset / Start New Interview", use_container_width=True):
         st.session_state.clear()
         st.rerun()
 
-# --- Initialize Session State ---
-if "chapter_text" not in st.session_state:
-    st.session_state.chapter_text = ""
-if "quiz_data" not in st.session_state:
-    st.session_state.quiz_data = None
-if "evaluation_result" not in st.session_state:
-    st.session_state.evaluation_result = None
+# --- Session State Initialization ---
+if "interview_started" not in st.session_state:
+    st.session_state.interview_started = False
+if "questions" not in st.session_state:
+    st.session_state.questions = []
+if "current_q_index" not in st.session_state:
+    st.session_state.current_q_index = 0
+if "user_answers" not in st.session_state:
+    st.session_state.user_answers = {}
+if "feedback" not in st.session_state:
+    st.session_state.feedback = None
 
-st.title("📚 Matric & Inter Textbook Exam Prep Coach")
-st.caption("Powered by Groq Llama-3.3 — Fast textbook question generation and board grading.")
+st.title("🎯 AI Technical & Behavioral Mock Interviewer")
+st.caption("Realistic interview practice powered by Groq LLaMA 3.3.")
 
-is_valid_key = api_key and api_key.startswith("gsk_")
+is_valid_key = bool(api_key and api_key.startswith("gsk_"))
 
 if not is_valid_key:
-    st.warning("⚠️ **Valid Groq API Key Required**")
-    st.info("Enter your Groq key starting with `gsk_` in the sidebar or save it under `GROQ_API_KEY` in Streamlit Secrets.")
+    st.warning("⚠️ **Groq API Key Required**")
+    st.info("Please provide a valid key starting with `gsk_` via Streamlit Secrets (`GROQ_API_KEY`) or the sidebar.")
+    st.stop()
 
-# --- 1. Chapter Input ---
-if not st.session_state.chapter_text:
-    st.subheader("1️⃣ Provide Your Textbook Chapter")
-    upload_tab, paste_tab = st.tabs(["📄 Upload Chapter (PDF)", "📝 Paste Notes"])
-    
-    with upload_tab:
-        uploaded_pdf = st.file_uploader("Upload Chapter PDF", type=["pdf"])
-        if uploaded_pdf and st.button("Process PDF Chapter", type="primary"):
-            with st.spinner("Reading textbook pages..."):
-                extracted = extract_text_from_pdf(uploaded_pdf)
-                if not extracted.strip():
-                    st.error("No readable text found in PDF.")
-                else:
-                    st.session_state.chapter_text = extracted[:15000]
-                    st.success("Text extracted successfully!")
-                    st.rerun()
-                    
-    with paste_tab:
-        pasted_text = st.text_area("Paste chapter text or topic notes:", height=250)
-        if pasted_text and st.button("Use Pasted Text", type="primary"):
-            st.session_state.chapter_text = pasted_text.strip()
+client = Groq(api_key=api_key)
+
+# --- Screen 1: Pre-Interview Setup ---
+if not st.session_state.interview_started:
+    st.subheader("Candidate Profile & Resume Context")
+    candidate_notes = st.text_area(
+        "Paste your key skills, notable projects, or resume summary (Optional):",
+        placeholder="E.g., Proficient in Python, Linux, Active Directory labs, network security fundamentals...",
+        height=180
+    )
+
+    if st.button("🚀 Begin Interview", type="primary"):
+        with st.spinner("Drafting role-specific interview questions..."):
+            prompt = f"""
+You are a senior hiring manager and technical interviewer conducting an interview for:
+- Role: {job_role}
+- Seniority: {experience_level}
+- Interview Style: {interview_style}
+- Candidate Background Context: {candidate_notes if candidate_notes.strip() else 'Standard graduate applicant'}
+
+Generate exactly {total_questions} interview questions tailored to this role.
+Return STRICTLY valid JSON with no markdown wrapping:
+{{
+  "questions": [
+    {{
+      "id": 1,
+      "category": "string (e.g. Technical / Scenario / Behavioral)",
+      "question": "string",
+      "what_evaluators_look_for": "string"
+    }}
+  ]
+}}
+"""
+            try:
+                response = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=[
+                        {"role": "system", "content": "You are a professional hiring manager. Output strictly valid JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.3
+                )
+                raw = clean_json_string(response.choices[0].message.content)
+                data = json.loads(raw)
+                st.session_state.questions = data.get("questions", [])
+                st.session_state.interview_started = True
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to generate questions: {e}")
+
+# --- Screen 2: Active Interview ---
+elif st.session_state.interview_started and st.session_state.feedback is None:
+    total_q = len(st.session_state.questions)
+    curr_idx = st.session_state.current_q_index
+    curr_q = st.session_state.questions[curr_idx]
+
+    progress = (curr_idx) / total_q
+    st.progress(progress, text=f"Question {curr_idx + 1} of {total_q}")
+
+    st.markdown(f"### Question {curr_idx + 1} ({curr_q.get('category', 'General')})")
+    st.info(f"🎙️ **{curr_q.get('question')}**")
+
+    existing_ans = st.session_state.user_answers.get(str(curr_q["id"]), "")
+    answer_text = st.text_area(
+        "Your Response:",
+        value=existing_ans,
+        placeholder="Formulate your response clearly (use STAR method for behavioral questions)...",
+        height=220,
+        key=f"ans_input_{curr_q['id']}"
+    )
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+
+    with c1:
+        if curr_idx > 0 and st.button("⬅️ Previous Question"):
+            st.session_state.user_answers[str(curr_q["id"])] = answer_text
+            st.session_state.current_q_index -= 1
             st.rerun()
 
-# --- 2. Exam Generation ---
-if st.session_state.chapter_text and st.session_state.quiz_data is None:
-    st.info("✅ Chapter content loaded.")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        num_mcqs = st.slider("MCQs", 2, 6, 3)
     with c2:
-        num_short = st.slider("Short Questions", 1, 4, 2)
-    with c3:
-        num_long = st.slider("Long Questions", 0, 2, 1)
+        if curr_idx < total_q - 1:
+            if st.button("Next Question ➡️", type="primary"):
+                if not answer_text.strip():
+                    st.warning("Please type a response before proceeding.")
+                else:
+                    st.session_state.user_answers[str(curr_q["id"])] = answer_text
+                    st.session_state.current_q_index += 1
+                    st.rerun()
+        else:
+            if st.button("🏁 Submit Interview", type="primary"):
+                if not answer_text.strip():
+                    st.warning("Please provide an answer before final submission.")
+                else:
+                    st.session_state.user_answers[str(curr_q["id"])] = answer_text
+                    
+                    with st.spinner("Analyzing performance and compiling evaluation report..."):
+                        eval_prompt = f"""
+You are an expert hiring committee lead evaluating a candidate's mock interview performance.
+- Position: {job_role} ({experience_level})
+- Questions and Candidate Answers:
+{json.dumps([{'question': q['question'], 'category': q['category'], 'answer': st.session_state.user_answers.get(str(q['id']), 'No answer provided')} for q in st.session_state.questions])}
 
-    if st.button("🎯 Generate Practice Exam", type="primary", disabled=not is_valid_key):
-        client = Groq(api_key=api_key)
-        with st.spinner("Generating exam with Groq... (~2-4 seconds)"):
-            prompt = f"""
-You are a board examiner for Pakistani {board_system} for {academic_level}.
-Generate practice questions derived STRICTLY from this textbook excerpt:
-\"\"\"
-{st.session_state.chapter_text}
-\"\"\"
-
-Requirements:
-- Exactly {num_mcqs} MCQs (4 options: A, B, C, D)
-- Exactly {num_short} Short Answer Questions
-- Exactly {num_long} Long / Essay Questions
-
-Respond ONLY with valid JSON using this exact schema:
+Provide a comprehensive, constructive assessment.
+Return STRICTLY valid JSON with no markdown wrapping:
 {{
-  "mcqs": [
-    {{
-      "id": 1,
-      "question": "string",
-      "options": ["A) option 1", "B) option 2", "C) option 3", "D) option 4"],
-      "correct_option": "A",
-      "textbook_ref": "string"
-    }}
-  ],
-  "short_questions": [
-    {{
-      "id": 1,
-      "question": "string",
-      "ideal_key_points": ["point 1", "point 2"]
-    }}
-  ],
-  "long_questions": [
-    {{
-      "id": 1,
-      "question": "string",
-      "rubric": "string"
-    }}
-  ]
-}}
-"""
-            try:
-                raw_json = safe_groq_generate(client, prompt)
-                clean_res = clean_json_string(raw_json)
-                st.session_state.quiz_data = json.loads(clean_res)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed to generate exam: {e}")
-
-# --- 3. Answering Interface ---
-if st.session_state.quiz_data and st.session_state.evaluation_result is None:
-    quiz = st.session_state.quiz_data
-    st.subheader("📝 Answer Your Exam Paper")
-    user_answers = {"mcqs": {}, "short": {}, "long": {}}
-    
-    if quiz.get("mcqs"):
-        st.markdown("### Part 1: Multiple Choice Questions")
-        for mcq in quiz["mcqs"]:
-            user_answers["mcqs"][str(mcq["id"])] = st.radio(
-                f"**Q{mcq['id']}:** {mcq['question']}",
-                mcq["options"],
-                index=None,
-                key=f"mcq_{mcq['id']}"
-            )
-        st.divider()
-
-    if quiz.get("short_questions"):
-        st.markdown("### Part 2: Short Answer Questions")
-        for sq in quiz["short_questions"]:
-            user_answers["short"][str(sq["id"])] = st.text_area(
-                f"**Q{sq['id']}:** {sq['question']}",
-                key=f"sq_{sq['id']}"
-            )
-        st.divider()
-
-    if quiz.get("long_questions"):
-        st.markdown("### Part 3: Long / Detailed Questions")
-        for lq in quiz["long_questions"]:
-            user_answers["long"][str(lq["id"])] = st.text_area(
-                f"**Q{lq['id']}:** {lq['question']}",
-                height=150,
-                key=f"lq_{lq['id']}"
-            )
-
-    if st.button("📤 Submit for Grading", type="primary", disabled=not is_valid_key):
-        client = Groq(api_key=api_key)
-        with st.spinner("Grading answers against textbook content..."):
-            eval_prompt = f"""
-You are an examiner for Pakistani {board_system} for {academic_level}.
-Grade these student answers STRICTLY against the textbook text below.
-
-TEXTBOOK CONTENT:
-{st.session_state.chapter_text}
-
-EXAM QUESTIONS:
-{json.dumps(quiz)}
-
-STUDENT SUBMITTED ANSWERS:
-{json.dumps(user_answers)}
-
-Language for explanations: {explanation_lang}
-(If "Urdu (اردو)", provide explanations in Urdu script. If "Roman Urdu", use Roman Urdu. If "English", use formal English.)
-
-Return strictly valid JSON:
-{{
-  "total_marks_obtained": 0,
-  "total_maximum_marks": 0,
-  "percentage": 0,
-  "general_verdict": "string",
-  "mcq_evaluations": [
-    {{
-      "id": 1,
-      "is_correct": true,
-      "student_choice": "string",
-      "correct_choice": "string",
-      "explanation": "string"
-    }}
-  ],
-  "subjective_evaluations": [
+  "overall_score": 0,
+  "hiring_verdict": "string (e.g. Strong Hire / Hire / Leaning No / Needs Preparation)",
+  "executive_summary": "string",
+  "strengths": ["string", "string"],
+  "areas_for_improvement": ["string", "string"],
+  "question_breakdown": [
     {{
       "question": "string",
-      "marks_awarded": 0,
-      "max_marks": 0,
+      "score": 0,
+      "candidate_response": "string",
       "feedback": "string",
-      "textbook_reference": "string",
-      "model_answer": "string"
+      "suggested_ideal_answer": "string"
     }}
   ]
 }}
 """
-            try:
-                eval_json = safe_groq_generate(client, eval_prompt)
-                clean_eval = clean_json_string(eval_json)
-                st.session_state.evaluation_result = json.loads(clean_eval)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Evaluation error: {e}")
+                        try:
+                            eval_res = client.chat.completions.create(
+                                model=MODEL_NAME,
+                                messages=[
+                                    {"role": "system", "content": "You are an executive interviewer. Output strictly valid JSON."},
+                                    {"role": "user", "content": eval_prompt}
+                                ],
+                                response_format={"type": "json_object"},
+                                temperature=0.2
+                            )
+                            clean_eval = clean_json_string(eval_res.choices[0].message.content)
+                            st.session_state.feedback = json.loads(clean_eval)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Evaluation error: {e}")
 
-# --- 4. Results ---
-if st.session_state.evaluation_result is not None:
-    res = st.session_state.evaluation_result
-    st.success("🏁 Paper Graded!")
-    
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Marks Obtained", f"{res.get('total_marks_obtained', 0)} / {res.get('total_maximum_marks', 0)}")
-    m2.metric("Percentage", f"{res.get('percentage', 0)}%")
-    m3.metric("Feedback Language", explanation_lang)
-    
-    st.info(f"**Examiner Remarks:** {res.get('general_verdict', '')}")
-    
-    if res.get("mcq_evaluations"):
-        st.markdown("### 🔘 MCQ Breakdown")
-        for item in res["mcq_evaluations"]:
-            mark = "✅ Correct" if item.get("is_correct") else "❌ Incorrect"
-            with st.expander(f"MCQ #{item.get('id')} — {mark}"):
-                st.write(f"**Your Choice:** {item.get('student_choice', 'Unanswered')}")
-                st.write(f"**Correct Choice:** {item.get('correct_choice', '')}")
-                st.markdown(f"**Explanation:** {item.get('explanation', '')}")
-                
-    if res.get("subjective_evaluations"):
-        st.markdown("### 📝 Subjective Question Feedback")
-        for subj in res["subjective_evaluations"]:
-            with st.expander(f"Question: {subj.get('question')} ({subj.get('marks_awarded')}/{subj.get('max_marks')} Marks)"):
-                st.markdown(f"**Feedback:** {subj.get('feedback')}")
-                st.info(f"**📖 Reference:** {subj.get('textbook_reference')}")
-                st.markdown(f"**🌟 Model Answer:**\n{subj.get('model_answer')}")
+# --- Screen 3: Final Performance Report ---
+elif st.session_state.feedback is not None:
+    res = st.session_state.feedback
+    st.balloons()
+    st.success("🎉 Interview Complete! Here is your performance debrief:")
 
-    if st.button("⬅️ Practice Another Chapter"):
+    score = res.get("overall_score", 0)
+    verdict = res.get("hiring_verdict", "N/A")
+
+    col1, col2 = st.columns(2)
+    col1.metric("Overall Score", f"{score} / 100")
+    col2.metric("Hiring Committee Verdict", verdict)
+
+    st.info(f"**Executive Summary:** {res.get('executive_summary', '')}")
+
+    s_col, w_col = st.columns(2)
+    with s_col:
+        st.markdown("#### ✅ Demonstrated Strengths")
+        for s in res.get("strengths", []):
+            st.markdown(f"- {s}")
+
+    with w_col:
+        st.markdown("#### 🎯 Priority Areas for Improvement")
+        for a in res.get("areas_for_improvement", []):
+            st.markdown(f"- {a}")
+
+    st.markdown("---")
+    st.subheader("📋 Question-by-Question Analysis")
+    for q_data in res.get("question_breakdown", []):
+        with st.expander(f"Q: {q_data.get('question')} — Score: {q_data.get('score', 0)}/10"):
+            st.write(f"**Your Answer:** {q_data.get('candidate_response')}")
+            st.markdown(f"**Feedback:** {q_data.get('feedback')}")
+            st.markdown(f"**💡 Ideal Answer Outline:**\n{q_data.get('suggested_ideal_answer')}")
+
+    if st.button("⬅️ Practice Another Session"):
         st.session_state.clear()
         st.rerun()
